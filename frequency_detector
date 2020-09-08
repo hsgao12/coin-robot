@@ -1,0 +1,159 @@
+#include <XC.h>
+#include <sys/attribs.h>
+#include <stdio.h>
+#include <stdlib.h>
+ 
+// Configuration Bits (somehow XC32 takes care of this)
+#pragma config FNOSC = FRCPLL       // Internal Fast RC oscillator (8 MHz) w/ PLL
+#pragma config FPLLIDIV = DIV_2     // Divide FRC before PLL (now 4 MHz)
+#pragma config FPLLMUL = MUL_20     // PLL Multiply (now 80 MHz)
+#pragma config FPLLODIV = DIV_2     // Divide After PLL (now 40 MHz)
+ 
+#pragma config FWDTEN = OFF         // Watchdog Timer Disabled
+#pragma config FPBDIV = DIV_1       // PBCLK = SYCLK
+
+// Defines
+#define SYSCLK 40000000L
+#define DEF_FREQ 1000000L
+#define T4_VALUE (SYSCLK/DEF_FREQ)-1
+#define Baud2BRG(desired_baud)( (SYSCLK / (16*desired_baud))-1)
+ 
+void UART2Configure(int baud_rate)
+{
+    // Peripheral Pin Select
+    U2RXRbits.U2RXR = 4;    //SET RX to RB8
+    RPB9Rbits.RPB9R = 2;    //SET RB9 to TX
+
+    U2MODE = 0;         // disable autobaud, TX and RX enabled only, 8N1, idle=HIGH
+    U2STA = 0x1400;     // enable TX and RX
+    U2BRG = Baud2BRG(baud_rate); // U2BRG = (FPb / (16*baud)) - 1
+    
+    U2MODESET = 0x8000;     // enable UART2
+}
+
+// Needed to by scanf() and gets()
+int _mon_getc(int canblock)
+{
+	char c;
+	
+    if (canblock)
+    {
+	    while( !U2STAbits.URXDA); // wait (block) until data available in RX buffer
+	    c=U2RXREG;
+        while( U2STAbits.UTXBF);    // wait while TX buffer full
+        U2TXREG = c;          // echo
+	    if(c=='\r') c='\n'; // When using PUTTY, pressing <Enter> sends '\r'.  Ctrl-J sends '\n'
+		return (int)c;
+    }
+    else
+    {
+        if (U2STAbits.URXDA) // if data available in RX buffer
+        {
+		    c=U2RXREG;
+		    if(c=='\r') c='\n';
+			return (int)c;
+        }
+        else
+        {
+            return -1; // no characters to return
+        }
+    }
+}
+
+// Uses Timer4 to delay <us> micro-seconds. 
+void Timer4us(unsigned char us)
+{
+	unsigned char i;               // usec counter
+	
+	// The input for Timer 4 is selected as SYSCLK by setting T3ML (bit 6) of CKCON0:
+	T4CONbits.TCS = 0;
+	
+	PR4 = 39; // Set Timer4 to overflow in 1us. (PIC32 counts up to PR4 value, then resets)
+	TMR4 = 0;
+	T4CONbits.TCKPS = 0; // 3=1:256 prescale value, 2=1:64 prescale value, 1=1:8 prescale value, 0=1:1 prescale value
+	T4CONbits.TCS = 0; // Clock source
+	T4CONbits.ON = 1;  // Turns on clock
+	  
+	for (i = 0; i < us; i++)       // Count <us> overflows
+	{
+		while (TMR4 != PR4);  // Wait for overflow
+		TMR4 = 0; 
+	}                 // Stop Timer3 and clear overflow flag
+}
+
+
+void waitms (unsigned int ms)
+{
+	unsigned int j;
+	for(j=ms; j!=0; j--)
+	{
+		Timer4us(249);
+		Timer4us(249);
+		Timer4us(249);
+		Timer4us(250);
+	}
+}
+
+void Timer5Init(void){
+	TMR5 = 0; 
+	T5CONbits.TCKPS = 0; 
+	T5CONbits.TCS = 0; 
+	T5CONbits.ON = 0; 
+	IFS5bits.T5IF = 0; //Clear interrupt flag
+}
+
+	
+void main (void) 
+{
+	float period;
+	int overflow_count; 
+	int overflow_num = 65535; 
+	float frequency; 
+	float last_frequency; 
+	int count = 0; 
+	int coin_flag = 0; 
+	
+	TIMER5_Init();
+
+
+    while (1)
+    {
+    	// Reset the counter
+		TMR5 = 0; 
+		last_frequency = frequency; 
+		
+		overflow_count=0;
+		TRISBbits.TRISB6 = 1;
+		
+		while(PORTBbits.RB6!=0); // Wait for the signal to be zero
+		while(PORTBbits.RB6!=1); // Wait for the signal to be one
+		T5CONbits.ON = 1; // Start the timer
+		while(PORTBbits.RB6!=0) // Wait for the signal to be zero
+		{
+			if(IFS5bits.T5IF == 1) // Did the 16-bit timer overflow?
+			{
+				IFS5bits.T5IF = 0; 
+				overflow_count++;
+			}
+		}
+		while(PORTBbits.RB6!=1) // Wait for the signal to be one
+		{
+			if(IFS5bits.T5IF == 1) // Did the 16-bit timer overflow?
+			{
+				IFS5bits.T5IF = 0;
+				overflow_count++;
+			}
+		}
+		T5CONbits.ON = 0; // Stop timer 0, the 24-bit number [overflow_count-TH0-TL0] has the period!
+		period=(overflow_count*65536.0+TMR5)/SYSCLK;
+		frequency = 1/period; 
+		
+		//??
+		if(count != 0){
+			if(frequency - last_frequency > 1 || last_frequency - frequency > 1)
+				coin_flag = 1; 
+		}
+		count++;		
+    }
+	
+}
